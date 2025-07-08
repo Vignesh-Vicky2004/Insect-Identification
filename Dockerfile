@@ -1,4 +1,6 @@
 # Multi-stage build for optimized BioCLIP pest identification service
+
+# --- Builder Stage ---
 FROM nvidia/cuda:11.8-base-ubuntu20.04 as builder
 
 # Set environment variables
@@ -49,7 +51,7 @@ COPY requirements.txt /tmp/requirements.txt
 # Install Python dependencies
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Production stage
+# --- Production Stage ---
 FROM nvidia/cuda:11.8-base-ubuntu20.04
 
 # Set environment variables
@@ -96,8 +98,9 @@ WORKDIR /app
 # Create non-root user for security
 RUN groupadd -r appuser && useradd -r -g appuser -u 1001 appuser
 
-# Create directories for model caching and logs
-RUN mkdir -p /app/.torch /app/.huggingface /app/models /app/logs
+# Create directories for model caching and logs, and set permissions
+RUN mkdir -p /app/.torch /app/.huggingface /app/models /app/logs \
+    && chown -R appuser:appuser /app
 
 # Copy application files
 COPY --chown=appuser:appuser main.py /app/
@@ -109,30 +112,27 @@ COPY --chown=appuser:appuser best_bioclip_classifier.pth /app/
 # Validate critical files exist
 RUN if [ ! -f "/app/main.py" ]; then echo "ERROR: main.py not found" && exit 1; fi
 RUN if [ ! -f "/app/best_bioclip_classifier.pth" ]; then \
-    echo "WARNING: Model file not found. Service may not work correctly."; \
+        echo "WARNING: Model file not found. Service may not work correctly."; \
     fi
 
-# Set proper permissions
+# Set proper permissions for the app directory
 RUN chown -R appuser:appuser /app
 
 # Switch to non-root user
 USER appuser
 
 # Pre-download BioCLIP model (optional - reduces startup time)
+# This will download the model to the TORCH_HOME/HF_HOME paths during build
 RUN python3.9 -c "import open_clip; print('Testing BioCLIP model loading...'); \
     try: \
         model, _, _ = open_clip.create_model_and_transforms('hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'); \
-        print('BioCLIP model loaded successfully'); \
+        print('BioCLIP model pre-downloaded successfully.'); \
     except Exception as e: \
-        print(f'Warning: Could not pre-load BioCLIP model: {e}'); \
-    "
+        print(f'Error pre-downloading BioCLIP model: {e}'); \
+        exit(1)"
 
-# Expose port
-EXPOSE $PORT
+# Expose the port FastAPI runs on
+EXPOSE ${PORT}
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:$PORT/health || exit 1
-
-# Run the application
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info"]
+# Command to run the application using Uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
