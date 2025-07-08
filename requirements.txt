@@ -1,40 +1,50 @@
-# FastAPI and server
+# Core FastAPI dependencies
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
-python-multipart==0.0.6
-aiofiles==23.2.1
-pydantic>=2.0.0
 
 # PyTorch ecosystem
-torch>=2.0.0
-torchvision>=0.15.0
-torchaudio>=2.0.0
---extra-index-url https://download.pytorch.org/whl/cu118
+torch>=2.0.0,<2.3.0
+torchvision>=0.15.0,<0.18.0
+torchaudio>=2.0.0,<2.3.0
 
-# BioCLIP and AI models
-open-clip-torch==2.20.0
-timm==0.9.7
-ftfy==6.1.1
-regex==2023.8.8
+# BioCLIP and OpenCLIP
+open_clip_torch>=2.20.0
 
-# Image processing
-opencv-python-headless==4.8.1.78
-pillow>=9.0.0
-albumentations==1.3.1
-scikit-image==0.21.0
+# Image processing and computer vision
+albumentations>=1.3.0
+opencv-python-headless>=4.8.0
+Pillow>=9.5.0
 
 # Scientific computing
-numpy>=1.21.0
-scipy>=1.9.0
+numpy>=1.24.0,<2.0.0
 
-# Data handling
-pandas>=1.5.0
-scikit-learn>=1.3.0
+# HTTP client for health checks
+httpx>=0.25.0
 
-# Utilities
-tqdm==4.66.1
-requests>=2.28.0
-aiohttp>=3.8.0
+# File handling and utilities
+python-multipart>=0.0.6
+python-json-logger>=2.0.7
 
-# Monitoring and logging
+# Additional ML utilities
+transformers>=4.30.0
+huggingface-hub>=0.16.0
+timm>=0.9.0
+
+# Optional: Progress bars for model downloads
+tqdm>=4.65.0
+
+# Optional: Better error handling and logging
+loguru>=0.7.0
+
+# Optional: Memory profiling (for debugging)
 psutil>=5.9.0
+
+# Security and validation
+pydantic>=2.0.0
+email-validator>=2.0.0
+
+# CORS support
+starlette>=0.27.0
+
+# Optional: Metrics and monitoring
+prometheus-client>=0.17.0
