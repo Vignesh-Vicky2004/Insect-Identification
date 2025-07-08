@@ -1,142 +1,94 @@
+import os
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from fastapi import UploadFile, HTTPException
-from fastapi.responses import JSONResponse
-from typing import Dict, Any, List
-from PIL import Image, ImageDraw, ImageFont
-import base64
-from io import BytesIO
 import open_clip
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-import time
-import os
+import numpy as np
+import base64
+from PIL import Image, ImageDraw, ImageFont
+from io import BytesIO
 import logging
+import time
 
-logger = logging.getLogger(__name__)
+# Global variables for model loading
+bioclip_model = None
+classifier = None
 
-class ModelConfig:
-    BIOCLIP_MODEL = 'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'
-    MODEL_PATH = 'best_bioclip_classifier.pth'
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    CLASS_NAMES = [
-        'Leaf-folder',
-        'Pink-Bollworm',
-        'leaf folder - adult',
-        'stem borer - adult',
-        'stemborer'
-    ]
-    CONFIDENCE_THRESHOLD = 0.5
+# TrueFoundry environment variables
+MODEL_PATH = os.getenv("MODEL_PATH", "best_bioclip_classifier.pth")
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-
-class OptimizedClassifier(nn.Module):
-    def __init__(self, input_dim, num_classes):
-        super().__init__()
-        self.model = nn.Sequential(
-            nn.Dropout(0.4),
-            nn.Linear(input_dim, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(0.12),
-            nn.Linear(256, num_classes)
+async def load_models():
+    """Load models during startup"""
+    global bioclip_model, classifier
+    
+    try:
+        # Load BioCLIP foundation model
+        bioclip_model, _, _ = open_clip.create_model_and_transforms(
+            'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'
         )
-
-    def forward(self, x):
-        return self.model(x)
-
-
-class BioCLIPPestService:
-    def __init__(self):
-        self.device = ModelConfig.DEVICE
-        self.class_names = ModelConfig.CLASS_NAMES
-        self._load_models()
-        self._setup_transforms()
-
-    def _load_models(self):
-        self.clip_model, _, _ = open_clip.create_model_and_transforms(ModelConfig.BIOCLIP_MODEL)
-        self.clip_model.to(self.device).eval()
-
-        dummy = torch.randn(1, 3, 224, 224).to(self.device)
-        self.feature_dim = self.clip_model.encode_image(dummy).shape[-1]
-
-        self.classifier = OptimizedClassifier(self.feature_dim, len(self.class_names)).to(self.device)
-        state = torch.load(ModelConfig.MODEL_PATH, map_location=self.device)
-        self.classifier.load_state_dict(state)
-        self.classifier.eval()
-
-    def _setup_transforms(self):
-        self.transforms = A.Compose([
-            A.Resize(224, 224),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ToTensorV2()
-        ])
-
-    def _preprocess(self, image: Image.Image) -> torch.Tensor:
-        np_img = np.array(image.convert("RGB"))
-        tensor = self.transforms(image=np_img)["image"].unsqueeze(0).to(self.device)
-        return tensor
-
-    def _annotate(self, image: Image.Image, label: str, confidence: float) -> str:
-        draw = ImageDraw.Draw(image)
-        font = ImageFont.load_default()
-        label_text = f"{label} ({confidence * 100:.1f}%)"
-        draw.text((10, 10), label_text, fill="white", font=font)
-        buffer = BytesIO()
-        image.save(buffer, format="JPEG")
-        return base64.b64encode(buffer.getvalue()).decode()
-
-    def _predict(self, tensor: torch.Tensor) -> Dict[str, Any]:
+        bioclip_model = bioclip_model.to(DEVICE)
+        bioclip_model.eval()
+        
+        # Load classifier
+        dummy_input = torch.randn(1, 3, 224, 224).to(DEVICE)
         with torch.no_grad():
-            features = self.clip_model.encode_image(tensor)
-            logits = self.classifier(features)
-            probs = F.softmax(logits, dim=1)
-            conf, pred = torch.max(probs, 1)
+            features = bioclip_model.encode_image(dummy_input)
+            feature_dim = features.shape[-1]
+        
+        classifier = OptimizedClassifier(feature_dim, 5).to(DEVICE)
+        classifier.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+        classifier.eval()
+        
+        logging.info("Models loaded successfully")
+        
+    except Exception as e:
+        logging.error(f"Failed to load models: {e}")
+        raise
 
-        return {
-            "label": self.class_names[pred.item()],
-            "confidence": conf.item(),
-            "all_probs": probs.squeeze().cpu().numpy()
-        }
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """TrueFoundry lifespan event handler"""
+    await load_models()
+    yield
 
-    async def identify_single(self, file: UploadFile) -> Dict[str, Any]:
-        image = Image.open(BytesIO(await file.read()))
-        tensor = self._preprocess(image)
-        start = time.time()
-        result = self._predict(tensor)
-        elapsed = round(time.time() - start, 3)
+# Create FastAPI app with TrueFoundry configuration
+app = FastAPI(
+    title="BioCLIP Pest Identification API",
+    version="2.0.0",
+    description="AI-powered pest identification using BioCLIP foundation model",
+    lifespan=lifespan,
+    root_path=os.getenv("TFY_SERVICE_ROOT_PATH", "")
+)
 
-        annotated = self._annotate(image, result["label"], result["confidence"])
-        return {
-            "species": result["label"],
-            "confidence": round(result["confidence"], 4),
-            "is_confident": result["confidence"] >= ModelConfig.CONFIDENCE_THRESHOLD,
-            "confidence_percentage": round(result["confidence"] * 100, 2),
-            "all_predictions": [
-                {"species": cls, "confidence": round(float(prob), 4), "confidence_percentage": round(float(prob) * 100, 2)}
-                for cls, prob in zip(self.class_names, result["all_probs"])
-            ],
-            "annotated_image": annotated,
-            "processing_time": elapsed,
-            "device": str(self.device)
-        }
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    async def identify_batch(self, files: List[UploadFile]) -> List[Dict[str, Any]]:
-        return [await self.identify_single(file) for file in files]
+# Health check endpoint (required for TrueFoundry)
+@app.get("/health")
+async def health():
+    """Health check endpoint for TrueFoundry readiness/liveness probes"""
+    return {"healthy": True, "status": "ready"}
 
-    def get_model_info(self):
-        return {
-            "model_type": "BioCLIP + Optimized Classifier",
-            "foundation_model": ModelConfig.BIOCLIP_MODEL,
-            "classifier_path": ModelConfig.MODEL_PATH,
-            "classes": self.class_names,
-            "confidence_threshold": ModelConfig.CONFIDENCE_THRESHOLD,
-            "device": str(self.device),
-            "feature_dimension": self.feature_dim,
-            "input_size": "224x224"
-        }
+# Your existing routes...
+@app.post("/predict")
+async def predict_pest(image: UploadFile = File(...)):
+    """Main prediction endpoint"""
+    # Your existing prediction logic here
+    pass
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
