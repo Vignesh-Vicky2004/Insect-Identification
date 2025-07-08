@@ -52,6 +52,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PATH="/opt/venv/bin:$PATH"
+ENV TORCH_HOME=/app/.torch
+ENV HF_HOME=/app/.huggingface
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
@@ -71,7 +73,9 @@ RUN apt-get update && apt-get install -y \
     libfreetype6 \
     fonts-liberation \
     fonts-dejavu-core \
-    && rm -rf /var/lib/apt/lists/*
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
 # Copy virtual environment from builder stage
 COPY --from=builder /opt/venv /opt/venv
@@ -80,9 +84,29 @@ COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 
 # Create non-root user for security
-RUN groupadd -r appuser && useradd -r -g appuser appuser
+RUN groupadd -r appuser && useradd -r -g appuser -u 1001 appuser
+
+# Create directories for model caching
+RUN mkdir -p /app/.torch /app/.huggingface /app/models
 
 # Copy application code
 COPY --chown=appuser:appuser . .
 
-# Create
+# Set proper permissions
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Pre-download YOLO model (optional - can be done at runtime)
+# RUN python -c "from ultralytics import YOLO; YOLO('yolo11n.pt')"
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Run the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
