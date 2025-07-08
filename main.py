@@ -36,7 +36,7 @@ CLASS_NAMES = [
 ]
 
 # GitHub model URL - Update with your actual GitHub raw file URL
-GITHUB_MODEL_URL = "https://github.com/Vignesh-Vicky2004/Insect-Identification/blob/main/best_bioclip_classifier.pth"
+GITHUB_MODEL_URL = "https://github.com/Vignesh-Vicky2004/Insect-Identification/raw/main/best_bioclip_classifier.pth"
 LOCAL_MODEL_PATH = "best_bioclip_classifier.pth"
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
