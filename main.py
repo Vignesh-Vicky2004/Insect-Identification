@@ -1,7 +1,7 @@
 """
-BioCLIP Pest Identification API - Error-Free Production Version
-==============================================================
-Simplified configuration and robust error handling for TrueFoundry deployment.
+BioCLIP Pest Identification API - CORRECTED VERSION
+=================================================
+This version properly uses your fine-tuned BioCLIP model
 """
 
 import os
@@ -12,10 +12,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
-import torchvision.models as models
 import numpy as np
 import base64
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 from io import BytesIO
 import logging
 import time
@@ -28,16 +27,23 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
+# Install required packages
+try:
+    import open_clip
+except ImportError:
+    os.system("pip install open-clip-torch")
+    import open_clip
+
 # =============================================================================
-# SIMPLIFIED CONFIGURATION
+# CONFIGURATION
 # =============================================================================
 
 class Config:
-    """Simplified configuration class - no dataclass complexity"""
-    # Model settings
+    """Configuration matching your fine-tuned model"""
     MODEL_VERSION = "2.4.0"
-    FEATURE_DIM = 2048
-    NUM_CLASSES = 5
+    
+    # BioCLIP model name (MUST match your training)
+    BIOCLIP_MODEL_NAME = 'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'
     
     # File paths
     GITHUB_MODEL_URL = "https://github.com/Vignesh-Vicky2004/Insect-Identification/raw/main/best_bioclip_classifier.pth"
@@ -46,21 +52,20 @@ class Config:
     # API settings
     MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
     REQUEST_TIMEOUT = 300
-    MAX_RETRIES = 3
     
-    # Image processing
+    # Image processing (must match your training)
     IMAGE_SIZE = (224, 224)
     NORMALIZE_MEAN = [0.485, 0.456, 0.406]
     NORMALIZE_STD = [0.229, 0.224, 0.225]
     
-    # Logging
+    # Model architecture (must match your training)
+    DROPOUT_RATE = 0.3
+    
     LOG_LEVEL = "INFO"
-    LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
-# Initialize configuration
 config = Config()
 
-# Class names for pest identification
+# Class names (MUST match your training exactly)
 CLASS_NAMES = [
     'Leaf-folder',
     'Pink-Bollworm', 
@@ -69,61 +74,48 @@ CLASS_NAMES = [
     'stemborer'
 ]
 
-# Device configuration
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # =============================================================================
 # LOGGING SETUP
 # =============================================================================
 
-def setup_logging():
-    """Configure application logging"""
-    logging.basicConfig(
-        level=getattr(logging, config.LOG_LEVEL),
-        format=config.LOG_FORMAT,
-        handlers=[logging.StreamHandler(sys.stdout)]
-    )
-    return logging.getLogger(__name__)
-
-logger = setup_logging()
+logging.basicConfig(
+    level=getattr(logging, config.LOG_LEVEL),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # GLOBAL VARIABLES
 # =============================================================================
 
-feature_extractor = None
+bioclip_model = None
 classifier = None
+tokenizer = None
+preprocess_val = None
 model_metadata = {}
 
 # =============================================================================
-# SIMPLIFIED MODEL DEFINITIONS
+# CORRECT MODEL DEFINITIONS
 # =============================================================================
 
-class SimpleFeatureExtractor(nn.Module):
-    """Reliable ResNet50-based feature extractor"""
-    
-    def __init__(self):
-        super().__init__()
-        self.backbone = models.resnet50(weights='DEFAULT')
-        self.backbone.fc = nn.Identity()
-        
-    def encode_image(self, x):
-        return self.backbone(x)
-    
-    def forward(self, x):
-        return self.encode_image(x)
-
-class SimpleClassifier(nn.Module):
-    """Simple, reliable classifier"""
-    
-    def __init__(self, input_dim=2048, num_classes=5):
+class BioCLIPClassifier(nn.Module):
+    """
+    EXACT classifier architecture from your fine-tuning code
+    This MUST match the architecture you used during training
+    """
+    def __init__(self, input_dim: int, num_classes: int, dropout_rate: float = 0.3):
         super().__init__()
         self.classifier = nn.Sequential(
-            nn.Dropout(0.3),
+            nn.Dropout(dropout_rate),
             nn.Linear(input_dim, 512),
+            nn.BatchNorm1d(512),
             nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(256, num_classes)
@@ -137,36 +129,24 @@ class SimpleClassifier(nn.Module):
 # =============================================================================
 
 async def download_model_safely():
-    """Download model with error handling"""
+    """Download your fine-tuned model"""
     try:
-        # Check existing file
         if os.path.exists(config.LOCAL_MODEL_PATH):
             file_size = os.path.getsize(config.LOCAL_MODEL_PATH)
             if file_size > 1000:
                 logger.info(f"✅ Using existing model ({file_size} bytes)")
                 return config.LOCAL_MODEL_PATH
         
-        logger.info("📥 Downloading model from GitHub...")
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (compatible; BioCLIP-API/1.0)',
-            'Accept': 'application/octet-stream'
-        }
+        logger.info("📥 Downloading fine-tuned model from GitHub...")
         
         response = requests.get(
             config.GITHUB_MODEL_URL,
-            headers=headers,
+            headers={'User-Agent': 'BioCLIP-API/1.0'},
             stream=True,
             timeout=config.REQUEST_TIMEOUT
         )
         response.raise_for_status()
         
-        # Validate response
-        content_type = response.headers.get('content-type', '')
-        if 'text/html' in content_type:
-            raise ValueError("Got HTML instead of binary data")
-        
-        # Download file
         total_size = 0
         with open(config.LOCAL_MODEL_PATH, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
@@ -174,86 +154,86 @@ async def download_model_safely():
                     f.write(chunk)
                     total_size += len(chunk)
         
-        if total_size == 0:
-            raise ValueError("Downloaded file is empty")
-        
         logger.info(f"✅ Model downloaded ({total_size} bytes)")
         return config.LOCAL_MODEL_PATH
         
     except Exception as e:
         logger.error(f"❌ Download failed: {e}")
-        return create_dummy_model()
-
-def create_dummy_model():
-    """Create dummy model for testing"""
-    try:
-        logger.info("🔄 Creating dummy model...")
-        dummy = SimpleClassifier(config.FEATURE_DIM, config.NUM_CLASSES)
-        torch.save(dummy.state_dict(), config.LOCAL_MODEL_PATH)
-        logger.info("✅ Dummy model created")
-        return config.LOCAL_MODEL_PATH
-    except Exception as e:
-        logger.error(f"❌ Dummy model creation failed: {e}")
         raise
 
+def get_bioclip_output_dim(model) -> int:
+    """Get the actual output dimension from BioCLIP model"""
+    try:
+        dummy_input = torch.randn(1, 3, *config.IMAGE_SIZE).to(DEVICE)
+        with torch.no_grad():
+            features = model.encode_image(dummy_input)
+            return features.shape[-1]
+    except Exception as e:
+        logger.error(f"Could not determine BioCLIP output dimension: {e}")
+        return 512  # Fallback
+
 async def initialize_models():
-    """Initialize models with comprehensive error handling"""
-    global feature_extractor, classifier, model_metadata
+    """Initialize BioCLIP model and your fine-tuned classifier"""
+    global bioclip_model, classifier, tokenizer, preprocess_val, model_metadata
     
     try:
-        logger.info("🔄 Starting model initialization...")
+        logger.info("🔄 Loading BioCLIP model...")
         
-        # Initialize feature extractor
-        logger.info("🖼️ Loading feature extractor...")
-        feature_extractor = SimpleFeatureExtractor()
-        feature_extractor = feature_extractor.to(DEVICE)
-        feature_extractor.eval()
+        # Load BioCLIP model (same as your training)
+        bioclip_model, _, preprocess_val = open_clip.create_model_and_transforms(
+            config.BIOCLIP_MODEL_NAME
+        )
+        bioclip_model = bioclip_model.to(DEVICE)
+        bioclip_model.eval()
         
-        # Test feature extractor
-        test_input = torch.randn(1, 3, *config.IMAGE_SIZE).to(DEVICE)
-        with torch.no_grad():
-            features = feature_extractor.encode_image(test_input)
-            actual_dim = features.shape[-1]
+        # Get tokenizer
+        tokenizer = open_clip.get_tokenizer(config.BIOCLIP_MODEL_NAME)
         
-        logger.info(f"✅ Feature extractor ready (dim: {actual_dim})")
+        # Get correct output dimension
+        output_dim = get_bioclip_output_dim(bioclip_model)
+        logger.info(f"✅ BioCLIP loaded (output_dim: {output_dim})")
         
-        # Download model
+        # Download your fine-tuned classifier
         model_path = await download_model_safely()
         
-        # Initialize classifier
-        logger.info("🎯 Loading classifier...")
-        classifier = SimpleClassifier(actual_dim, len(CLASS_NAMES))
+        # Initialize classifier with EXACT architecture
+        classifier = BioCLIPClassifier(
+            input_dim=output_dim,
+            num_classes=len(CLASS_NAMES),
+            dropout_rate=config.DROPOUT_RATE
+        )
         
-        # Try to load trained weights
+        # Load your fine-tuned weights
         try:
             state_dict = torch.load(model_path, map_location=DEVICE)
             classifier.load_state_dict(state_dict)
-            logger.info("✅ Trained weights loaded")
+            logger.info("✅ Fine-tuned classifier weights loaded")
             model_loaded = True
         except Exception as e:
-            logger.warning(f"⚠️ Using random weights: {e}")
+            logger.error(f"❌ Failed to load fine-tuned weights: {e}")
+            logger.info("Using random weights - predictions will be wrong!")
             model_loaded = False
         
         classifier = classifier.to(DEVICE)
         classifier.eval()
         
-        # Test pipeline
+        # Test the complete pipeline
+        test_input = torch.randn(1, 3, *config.IMAGE_SIZE).to(DEVICE)
         with torch.no_grad():
-            test_features = feature_extractor.encode_image(test_input)
-            test_output = classifier(test_features)
-            test_probs = F.softmax(test_output, dim=1)
+            features = bioclip_model.encode_image(test_input)
+            outputs = classifier(features)
+            probs = F.softmax(outputs, dim=1)
         
-        # Store metadata
         model_metadata = {
-            "feature_dim": actual_dim,
+            "bioclip_model": config.BIOCLIP_MODEL_NAME,
+            "feature_dim": output_dim,
             "num_classes": len(CLASS_NAMES),
             "model_loaded": model_loaded,
             "device": str(DEVICE),
             "version": config.MODEL_VERSION
         }
         
-        logger.info(f"✅ Pipeline test successful (shape: {test_probs.shape})")
-        logger.info("🎉 Models initialized successfully!")
+        logger.info("🎉 BioCLIP and fine-tuned classifier initialized successfully!")
         
     except Exception as e:
         logger.error(f"❌ Model initialization failed: {e}")
@@ -263,8 +243,8 @@ async def initialize_models():
 # IMAGE PROCESSING
 # =============================================================================
 
-def setup_transforms():
-    """Setup image transforms"""
+def setup_bioclip_transforms():
+    """Use BioCLIP's validation transforms"""
     return transforms.Compose([
         transforms.Resize(config.IMAGE_SIZE),
         transforms.ToTensor(),
@@ -272,7 +252,7 @@ def setup_transforms():
     ])
 
 def process_image(image_bytes):
-    """Process image with validation"""
+    """Process image for BioCLIP"""
     if len(image_bytes) == 0:
         raise ValueError("Empty image data")
     
@@ -281,8 +261,12 @@ def process_image(image_bytes):
     if pil_image.size[0] < 32 or pil_image.size[1] < 32:
         raise ValueError("Image too small")
     
-    transform = setup_transforms()
-    image_tensor = transform(pil_image).unsqueeze(0).to(DEVICE)
+    # Use BioCLIP preprocessing
+    if preprocess_val is not None:
+        image_tensor = preprocess_val(pil_image).unsqueeze(0).to(DEVICE)
+    else:
+        transform = setup_bioclip_transforms()
+        image_tensor = transform(pil_image).unsqueeze(0).to(DEVICE)
     
     return image_tensor, pil_image
 
@@ -294,29 +278,23 @@ def process_image(image_bytes):
 async def lifespan(app: FastAPI):
     """Application lifespan management"""
     try:
-        logger.info("🚀 Starting application...")
+        logger.info("🚀 Starting BioCLIP API...")
         await initialize_models()
         logger.info("✅ Application ready!")
         yield
     except Exception as e:
         logger.error(f"❌ Startup failed: {e}")
-        # Allow degraded mode
-        global feature_extractor, classifier
-        feature_extractor = None
-        classifier = None
-        yield
+        raise
     finally:
         logger.info("🔄 Application shutdown...")
 
-# Create FastAPI app
 app = FastAPI(
     title="BioCLIP Pest Identification API",
     version=config.MODEL_VERSION,
-    description="Error-free pest identification API for TrueFoundry",
+    description="Fine-tuned BioCLIP model for pest identification",
     lifespan=lifespan
 )
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -335,41 +313,35 @@ async def root():
     return {
         "message": "BioCLIP Pest Identification API",
         "version": config.MODEL_VERSION,
-        "status": "running",
+        "bioclip_model": config.BIOCLIP_MODEL_NAME,
         "classes": CLASS_NAMES,
         "device": str(DEVICE),
-        "models_loaded": feature_extractor is not None and classifier is not None,
-        "endpoints": {
-            "health": "/health",
-            "predict": "/predict",
-            "docs": "/docs"
-        }
+        "models_loaded": bioclip_model is not None and classifier is not None
     }
 
 @app.get("/health")
 async def health():
     """Health check endpoint"""
-    global feature_extractor, classifier
-    
-    if feature_extractor is None or classifier is None:
+    if bioclip_model is None or classifier is None:
         return JSONResponse(
             status_code=503,
             content={"healthy": False, "status": "models not loaded"}
         )
     
     try:
-        # Test inference
+        # Test BioCLIP pipeline
         test_input = torch.randn(1, 3, *config.IMAGE_SIZE).to(DEVICE)
         with torch.no_grad():
-            features = feature_extractor.encode_image(test_input)
+            features = bioclip_model.encode_image(test_input)
             outputs = classifier(features)
         
         return {
             "healthy": True,
             "status": "ready",
-            "models_loaded": True,
+            "bioclip_loaded": True,
+            "classifier_loaded": True,
             "device": str(DEVICE),
-            "version": config.MODEL_VERSION
+            "metadata": model_metadata
         }
         
     except Exception as e:
@@ -380,19 +352,12 @@ async def health():
 
 @app.post("/predict")
 async def predict_pest(image: UploadFile = File(...)):
-    """Prediction endpoint"""
-    global feature_extractor, classifier
-    
-    # Check models
-    if feature_extractor is None or classifier is None:
+    """Prediction endpoint using fine-tuned BioCLIP"""
+    if bioclip_model is None or classifier is None:
         raise HTTPException(status_code=503, detail="Models not loaded")
     
-    # Validate image
     if not image.content_type or not image.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="File must be an image")
-    
-    if image.size and image.size > config.MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="File too large")
     
     try:
         # Process image
@@ -400,19 +365,19 @@ async def predict_pest(image: UploadFile = File(...)):
         image_bytes = await image.read()
         image_tensor, pil_image = process_image(image_bytes)
         
-        # Run inference
+        # Run inference with BioCLIP + fine-tuned classifier
         start_time = time.time()
         with torch.no_grad():
-            features = feature_extractor.encode_image(image_tensor)
+            # Extract features using BioCLIP
+            features = bioclip_model.encode_image(image_tensor)
+            
+            # Classify using your fine-tuned classifier
             outputs = classifier(features)
             probabilities = F.softmax(outputs, dim=1)
             
             confidence, predicted_class = torch.max(probabilities, 1)
             confidence_score = confidence.item()
             predicted_idx = predicted_class.item()
-            
-            if predicted_idx >= len(CLASS_NAMES):
-                predicted_idx = 0
             
             predicted_class_name = CLASS_NAMES[predicted_idx]
             all_probs = probabilities.squeeze().cpu().numpy()
@@ -435,29 +400,21 @@ async def predict_pest(image: UploadFile = File(...)):
                 }
                 for class_name, prob in zip(CLASS_NAMES, all_probs)
             ],
-            "image_info": {
-                "filename": image.filename,
-                "width": pil_image.size[0],
-                "height": pil_image.size[1],
-                "size_bytes": len(image_bytes)
+            "model_info": {
+                "bioclip_model": config.BIOCLIP_MODEL_NAME,
+                "fine_tuned": model_metadata.get("model_loaded", False),
+                "feature_dim": model_metadata.get("feature_dim", "unknown")
             },
             "processing_time": round(processing_time, 3),
-            "device": str(DEVICE),
-            "version": config.MODEL_VERSION
+            "device": str(DEVICE)
         }
         
         logger.info(f"✅ Prediction: {predicted_class_name} ({confidence_score:.2%})")
         return JSONResponse(content=response)
         
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"❌ Prediction failed: {e}")
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
-
-# =============================================================================
-# ERROR HANDLERS
-# =============================================================================
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -467,10 +424,6 @@ async def global_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"error": "Internal server error", "type": type(exc).__name__}
     )
-
-# =============================================================================
-# MAIN ENTRY POINT
-# =============================================================================
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
