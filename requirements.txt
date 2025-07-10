@@ -28,5 +28,5 @@ timm>=0.9.0,<1.0.0
 ftfy>=6.1.0
 regex>=2023.0.0
 
-# Optional: for better performance
-accelerate>=0.20.0
+# Package management (for version detection)
+setuptools>=65.0.0
