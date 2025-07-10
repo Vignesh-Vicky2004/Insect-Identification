@@ -196,6 +196,29 @@ def setup_model_cache():
     logger.warning("No cache directory could be set up")
     return None
 
+def reset_model_state():
+    """Reset model state to ensure clean predictions"""
+    global bioclip_model, classifier
+    
+    if bioclip_model is not None:
+        bioclip_model.eval()
+        
+        # Reset any stateful layers in BioCLIP model
+        for module in bioclip_model.modules():
+            if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d)):
+                module.reset_running_stats()
+    
+    if classifier is not None:
+        classifier.eval()
+        
+        # Reset BatchNorm in classifier - CRITICAL FIX
+        for module in classifier.modules():
+            if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d)):
+                module.reset_running_stats()
+                # Ensure tracking is disabled during inference
+                module.track_running_stats = True
+                module.momentum = 0.1  # Reset to default
+
 async def download_with_retry(url: str, filepath: str, max_retries: int = 5) -> bool:
     """Download file with retry logic and better error handling"""
     
@@ -575,7 +598,7 @@ def create_prediction_visualization(image: Image.Image, prediction: Dict[str, An
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Enhanced application lifespan with better error handling"""
-    logger.info("🚀 Starting BioCLIP Pest Identification API v4.0")
+    logger.info("🚀 Starting BioCLIP Pest Identification API v4.1")
     logger.info("=" * 60)
     
     # Log system info
@@ -616,8 +639,8 @@ async def lifespan(app: FastAPI):
 # Initialize FastAPI
 app = FastAPI(
     title="BioCLIP Pest Identification API",
-    version="4.0.0",
-    description="Production-ready pest identification API using BioCLIP with comprehensive error handling",
+    version="4.1.0",
+    description="Production-ready pest identification API with state management fixes",
     lifespan=lifespan
 )
 
@@ -640,7 +663,7 @@ async def root():
     
     return {
         "message": "BioCLIP Pest Identification API",
-        "version": "4.0.0",
+        "version": "4.1.0",
         "status": "running",
         "model_status": model_status,
         "startup_success": getattr(app.state, 'startup_success', False),
@@ -650,6 +673,7 @@ async def root():
             "health": "/health - API health check",
             "predict": "/predict - Pest identification",
             "debug": "/debug - Debug information",
+            "model-state": "/model-state - Model state monitoring",
             "reload": "/reload - Reload models",
             "docs": "/docs - API documentation"
         },
@@ -733,7 +757,7 @@ async def health_check():
 
 @app.post("/predict")
 async def predict_pest(image: UploadFile = File(...)):
-    """Enhanced pest prediction with validation"""
+    """Enhanced pest prediction with complete state management"""
     global bioclip_model, classifier
     
     # Check model availability
@@ -751,9 +775,8 @@ async def predict_pest(image: UploadFile = File(...)):
         )
     
     try:
-        # Read image
+        # Read and validate image
         image_bytes = await image.read()
-        
         if len(image_bytes) == 0:
             raise HTTPException(status_code=400, detail="Empty image file")
         
@@ -762,50 +785,72 @@ async def predict_pest(image: UploadFile = File(...)):
         
         # Process image
         pil_image = Image.open(BytesIO(image_bytes))
-        
-        # Validate dimensions
         if min(pil_image.size) < 32:
             raise HTTPException(status_code=400, detail="Image too small (min 32x32)")
         
-        # Convert to RGB
         if pil_image.mode != 'RGB':
             pil_image = pil_image.convert('RGB')
         
-        # Preprocess
+        # CRITICAL: Reset model state before each prediction
+        reset_model_state()
+        
+        # CRITICAL: Ensure models are in eval mode
+        bioclip_model.eval()
+        classifier.eval()
+        
+        # Clear GPU cache to prevent state accumulation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Preprocess image
         image_tensor = preprocess_image(pil_image).to(DEVICE)
         
-        # Predict
+        # Predict with complete state isolation
         start_time = time.time()
         
         with torch.no_grad():
+            # Ensure no gradient tracking
+            image_tensor = image_tensor.detach()
+            
+            # Extract features with fresh state
             features = bioclip_model.encode_image(image_tensor)
+            features = features.detach()  # Critical: detach from computation graph
+            
+            # Classify with clean state
             outputs = classifier(features)
+            outputs = outputs.detach()
+            
+            # Calculate probabilities
             probabilities = F.softmax(outputs, dim=1)
+            probabilities = probabilities.detach()
             
+            # Get results immediately and move to CPU
             confidence, predicted_class = torch.max(probabilities, 1)
-            predicted_idx = predicted_class.item()
-            predicted_species = CLASS_NAMES[predicted_idx]
-            
-            # Get all scores
+            predicted_idx = predicted_class.cpu().item()
+            confidence_val = confidence.cpu().item()
             all_probs = probabilities.cpu().numpy().flatten()
-            class_scores = {
-                class_name: round(float(prob), 4)
-                for class_name, prob in zip(CLASS_NAMES, all_probs)
-            }
             
-            sorted_scores = dict(sorted(class_scores.items(), key=lambda x: x[1], reverse=True))
-        
+            # Explicit cleanup of GPU tensors
+            del image_tensor, features, outputs, probabilities, confidence, predicted_class
+            
         processing_time = time.time() - start_time
         
-        # Create result
+        # Process results
+        predicted_species = CLASS_NAMES[predicted_idx]
+        class_scores = {
+            class_name: round(float(prob), 4)
+            for class_name, prob in zip(CLASS_NAMES, all_probs)
+        }
+        sorted_scores = dict(sorted(class_scores.items(), key=lambda x: x[1], reverse=True))
+        
         prediction_result = {
             "species": predicted_species,
-            "confidence": round(confidence.item(), 4),
-            "confidence_percentage": round(confidence.item() * 100, 2),
+            "confidence": round(confidence_val, 4),
+            "confidence_percentage": round(confidence_val * 100, 2),
             "all_class_scores": sorted_scores,
             "prediction_quality": (
-                "high" if confidence.item() > 0.8 else 
-                "medium" if confidence.item() > 0.6 else 
+                "high" if confidence_val > 0.8 else 
+                "medium" if confidence_val > 0.6 else 
                 "low"
             )
         }
@@ -839,6 +884,35 @@ async def predict_pest(image: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Prediction error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/model-state")
+async def check_model_state():
+    """Debug endpoint to check model state"""
+    global bioclip_model, classifier
+    
+    state_info = {
+        "bioclip_training": bioclip_model.training if bioclip_model else None,
+        "classifier_training": classifier.training if classifier else None,
+        "cuda_memory_allocated": torch.cuda.memory_allocated() if torch.cuda.is_available() else 0,
+        "cuda_memory_cached": torch.cuda.memory_reserved() if torch.cuda.is_available() else 0,
+        "timestamp": time.time()
+    }
+    
+    # Check BatchNorm states
+    if classifier is not None:
+        bn_states = {}
+        for name, module in classifier.named_modules():
+            if isinstance(module, nn.BatchNorm1d):
+                bn_states[name] = {
+                    "training": module.training,
+                    "track_running_stats": module.track_running_stats,
+                    "running_mean_sum": float(module.running_mean.sum()) if module.running_mean is not None else None,
+                    "running_var_sum": float(module.running_var.sum()) if module.running_var is not None else None,
+                    "momentum": module.momentum
+                }
+        state_info["batchnorm_states"] = bn_states
+    
+    return state_info
 
 @app.get("/debug")
 async def debug_info():
