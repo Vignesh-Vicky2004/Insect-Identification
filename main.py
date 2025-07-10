@@ -105,11 +105,23 @@ def get_system_info():
         info["cuda_device_name"] = torch.cuda.get_device_name(0)
         info["cuda_memory_total"] = torch.cuda.get_device_properties(0).total_memory
     
+    # Fixed: Handle open_clip version properly
     try:
         import open_clip
-        info["open_clip_version"] = open_clip.__version__
-    except:
+        # Try different ways to get version
+        version = getattr(open_clip, '__version__', None)
+        if version is None:
+            # Try to get version from package metadata
+            try:
+                import pkg_resources
+                version = pkg_resources.get_distribution('open_clip_torch').version
+            except:
+                version = "Available but version unknown"
+        info["open_clip_version"] = version
+    except ImportError:
         info["open_clip_version"] = "Not available"
+    except Exception as e:
+        info["open_clip_version"] = f"Error: {str(e)}"
     
     return info
 
@@ -129,14 +141,14 @@ async def load_bioclip_models():
         # Import open_clip after dependency check
         try:
             import open_clip
-            logger.info(f"open_clip version: {open_clip.__version__}")
+            logger.info("✓ open_clip imported successfully")
         except Exception as e:
             logger.error(f"Failed to import open_clip: {e}")
             raise RuntimeError(f"open_clip import failed: {e}")
         
         logger.info("Loading BioCLIP model...")
         
-        # Method 1: Try standard loading
+        # Method 1: Try standard loading with error handling
         try:
             bioclip_model, _, bioclip_preprocess = open_clip.create_model_and_transforms(
                 'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'
@@ -145,8 +157,9 @@ async def load_bioclip_models():
         except Exception as e1:
             logger.warning(f"Standard loading failed: {e1}")
             
-            # Method 2: Try with specific parameters
+            # Method 2: Try with cache directory
             try:
+                os.makedirs('./model_cache', exist_ok=True)
                 bioclip_model, _, bioclip_preprocess = open_clip.create_model_and_transforms(
                     'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224',
                     device=DEVICE,
@@ -156,13 +169,14 @@ async def load_bioclip_models():
             except Exception as e2:
                 logger.warning(f"Cache loading failed: {e2}")
                 
-                # Method 3: Try alternative model loading
+                # Method 3: Try alternative loading approach
                 try:
                     bioclip_model = open_clip.create_model(
-                        'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224',
-                        device=DEVICE
+                        'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'
                     )
-                    bioclip_preprocess = open_clip.get_preprocessing(bioclip_model)
+                    _, bioclip_preprocess = open_clip.create_model_and_transforms(
+                        'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'
+                    )[1:]
                     logger.info("✓ BioCLIP loaded successfully with alternative method")
                 except Exception as e3:
                     logger.error(f"All loading methods failed: {e1}, {e2}, {e3}")
@@ -263,10 +277,14 @@ async def download_trained_classifier():
         os.makedirs(os.path.dirname(LOCAL_MODEL_PATH) if os.path.dirname(LOCAL_MODEL_PATH) else '.', exist_ok=True)
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
-        response = requests.get(GITHUB_MODEL_URL, headers=headers, stream=True, timeout=300)
+        # Use session for better connection handling
+        session = requests.Session()
+        session.headers.update(headers)
+        
+        response = session.get(GITHUB_MODEL_URL, stream=True, timeout=300)
         response.raise_for_status()
         
         total_size = int(response.headers.get('content-length', 0))
@@ -425,7 +443,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="BioCLIP Pest Identification API",
-    version="3.2.0",
+    version="3.2.1",
     description="API for pest identification using BioCLIP with comprehensive error handling",
     lifespan=lifespan
 )
@@ -445,7 +463,7 @@ async def root():
     
     return {
         "message": "BioCLIP Pest Identification API",
-        "version": "3.2.0",
+        "version": "3.2.1",
         "status": "running",
         "model_status": model_status,
         "model_info": {
@@ -609,6 +627,7 @@ async def debug_info():
 async def reload_models():
     """Manually reload models"""
     try:
+        logger.info("Manual model reload requested...")
         await load_bioclip_models()
         return {"success": True, "message": "Models reloaded successfully"}
     except Exception as e:
