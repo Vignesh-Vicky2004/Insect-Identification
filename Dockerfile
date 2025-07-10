@@ -5,6 +5,8 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV HF_HOME=/app/models
 ENV TRANSFORMERS_CACHE=/app/models
+ENV HF_HUB_CACHE=/app/models
+ENV TORCH_HOME=/app/models
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -17,13 +19,7 @@ WORKDIR /app
 RUN mkdir -p /app/models /app/model_cache /app/logs && \
     chmod 755 /app/models /app/model_cache /app/logs
 
-# Copy requirements and install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Pre-download BioCLIP model during build
-# Copy requirements and install dependencies
+# Copy requirements and install dependencies (ONLY ONCE)
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
@@ -31,7 +27,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 # Copy and run model download script
 COPY download_models.py .
 RUN python download_models.py
-
 
 # Copy application code
 COPY main.py .
